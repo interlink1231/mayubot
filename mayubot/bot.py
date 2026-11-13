@@ -30,6 +30,7 @@ class MayuBot(commands.Bot):
         await self.db.initialize()
         for extension in (
             "mayubot.cogs.security",
+            "mayubot.cogs.blacklist",
             "mayubot.cogs.automod",
             "mayubot.cogs.antiraid",
             "mayubot.cogs.server_tags",
