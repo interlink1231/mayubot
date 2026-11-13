@@ -1,0 +1,1 @@
+"""MAYUBOT security feature cogs."""
