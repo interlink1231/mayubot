@@ -50,6 +50,22 @@ class Database:
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
+                CREATE TABLE IF NOT EXISTS guild_blacklist (
+                    guild_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'pending'
+                        CHECK(status IN ('pending','reviewed','rejected')),
+                    reason_code TEXT NOT NULL,
+                    evidence_reference TEXT,
+                    added_by INTEGER NOT NULL,
+                    reviewed_by INTEGER,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (guild_id, user_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_guild_blacklist_status
+                    ON guild_blacklist(guild_id, status);
+
                 CREATE TABLE IF NOT EXISTS security_events (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     guild_id INTEGER NOT NULL,
@@ -128,7 +144,70 @@ class Database:
             )
             await db.commit()
 
-    async def find_blacklisted_members(self, member_ids: list[int]) -> list[dict[str, Any]]:
+    async def add_blacklist_entry(
+        self, guild_id: int, user_id: int, reason_code: str,
+        evidence_reference: str | None, added_by: int,
+    ) -> bool:
+        async with aiosqlite.connect(self.path) as db:
+            cur = await db.execute(
+                """INSERT OR IGNORE INTO guild_blacklist
+                (guild_id, user_id, reason_code, evidence_reference, added_by)
+                VALUES (?, ?, ?, ?, ?)""",
+                (guild_id, user_id, reason_code[:80], evidence_reference, added_by),
+            )
+            await db.commit()
+            return cur.rowcount > 0
+
+    async def review_blacklist_entry(
+        self, guild_id: int, user_id: int, status: str, reviewed_by: int
+    ) -> bool:
+        if status not in {"reviewed", "rejected"}:
+            raise ValueError("Invalid review status")
+        async with aiosqlite.connect(self.path) as db:
+            cur = await db.execute(
+                """UPDATE guild_blacklist
+                SET status = ?, reviewed_by = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE guild_id = ? AND user_id = ? AND status = 'pending'""",
+                (status, reviewed_by, guild_id, user_id),
+            )
+            await db.commit()
+            return cur.rowcount > 0
+
+    async def remove_blacklist_entry(self, guild_id: int, user_id: int) -> bool:
+        async with aiosqlite.connect(self.path) as db:
+            cur = await db.execute(
+                "DELETE FROM guild_blacklist WHERE guild_id = ? AND user_id = ?",
+                (guild_id, user_id),
+            )
+            await db.commit()
+            return cur.rowcount > 0
+
+    async def list_blacklist_entries(
+        self, guild_id: int, status: str | None = None, limit: int = 20
+    ) -> list[dict[str, Any]]:
+        async with aiosqlite.connect(self.path) as db:
+            db.row_factory = aiosqlite.Row
+            if status:
+                cur = await db.execute(
+                    """SELECT user_id, status, reason_code, evidence_reference,
+                    added_by, reviewed_by, created_at
+                    FROM guild_blacklist WHERE guild_id = ? AND status = ?
+                    ORDER BY created_at DESC LIMIT ?""",
+                    (guild_id, status, limit),
+                )
+            else:
+                cur = await db.execute(
+                    """SELECT user_id, status, reason_code, evidence_reference,
+                    added_by, reviewed_by, created_at
+                    FROM guild_blacklist WHERE guild_id = ?
+                    ORDER BY created_at DESC LIMIT ?""",
+                    (guild_id, limit),
+                )
+            return [dict(row) for row in await cur.fetchall()]
+
+    async def find_blacklisted_members(
+        self, guild_id: int, member_ids: list[int]
+    ) -> list[dict[str, Any]]:
         if not member_ids:
             return []
         marks = ",".join("?" for _ in member_ids)
@@ -136,7 +215,8 @@ class Database:
             db.row_factory = aiosqlite.Row
             cur = await db.execute(
                 f"""SELECT user_id, reason_code, status, evidence_reference
-                FROM blacklist WHERE status = 'reviewed' AND user_id IN ({marks})""",
-                member_ids,
+                FROM guild_blacklist
+                WHERE guild_id = ? AND status = 'reviewed' AND user_id IN ({marks})""",
+                [guild_id, *member_ids],
             )
             return [dict(row) for row in await cur.fetchall()]
